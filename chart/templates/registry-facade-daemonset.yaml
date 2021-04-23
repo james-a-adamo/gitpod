@@ -74,11 +74,15 @@ spec:
         - name: metrics
           containerPort: 9500
           {{- end }}
+        - name: http
+          containerPort: 32224
         securityContext:
           privileged: false
           runAsUser: 1000
 {{ include "gitpod.container.defaultEnv" $this | indent 8 }}
 {{ include "gitpod.container.tracingEnv" $this | indent 8 }}
+        - name: REGFAC_NO_TLS_DEBUG
+          value: ":32224"
         volumeMounts:
         - name: cache
           mountPath: "/mnt/cache"

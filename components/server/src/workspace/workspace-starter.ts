@@ -231,7 +231,7 @@ export class WorkspaceStarter {
      *
      * @param workspace the workspace to create an instance for
      */
-    protected async newInstance(workspace: Workspace, user: User): Promise<WorkspaceInstance> {
+    public async newInstance(workspace: Workspace, user: User): Promise<WorkspaceInstance> {
         const theiaVersion = this.env.theiaVersion;
         const ideImage = this.env.ideDefaultImage;
 
@@ -474,7 +474,7 @@ export class WorkspaceStarter {
         }
     }
 
-    protected async createSpec(traceCtx: TraceContext, user: User, workspace: Workspace, instance: WorkspaceInstance, userEnvVars?: UserEnvVarValue[]): Promise<StartWorkspaceSpec> {
+    public async createSpec(traceCtx: TraceContext, user: User, workspace: Workspace, instance: WorkspaceInstance, userEnvVars?: UserEnvVarValue[]): Promise<StartWorkspaceSpec> {
         const context = workspace.context;
 
         let allEnvVars: UserEnvVarValue[] = [];

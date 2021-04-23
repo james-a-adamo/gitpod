@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/gitpod-io/gitpod/common-go/log"
 	"github.com/gitpod-io/gitpod/registry-facade/api"
 	lru "github.com/hashicorp/golang-lru"
 	ociv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/xerrors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/metadata"
 )
 
 // ErrRefInvalid is returned by spec provider who cannot interpret the ref
@@ -24,7 +26,7 @@ var ErrRefInvalid = fmt.Errorf("invalid ref")
 // based on the ref
 type ImageSpecProvider interface {
 	// GetSpec returns the spec for the image or a wrapped ErrRefInvalid
-	GetSpec(ctx context.Context, ref string) (*api.ImageSpec, error)
+	GetSpec(ctx context.Context, ref, authToken string) (*api.ImageSpec, error)
 }
 
 // RemoteSpecProvider queries a remote spec provider using gRPC
@@ -44,7 +46,7 @@ func NewRemoteSpecProvider(addr string, opts []grpc.DialOption) *RemoteSpecProvi
 }
 
 // GetSpec returns the spec for the image or a wrapped ErrRefInvalid
-func (p *RemoteSpecProvider) GetSpec(ctx context.Context, ref string) (*api.ImageSpec, error) {
+func (p *RemoteSpecProvider) GetSpec(ctx context.Context, ref, authToken string) (*api.ImageSpec, error) {
 	client, err := p.getClient(ctx)
 	if err != nil {
 		return nil, xerrors.Errorf("%w: %s", ErrRefInvalid, err.Error())
@@ -82,6 +84,78 @@ func (p *RemoteSpecProvider) getClient(ctx context.Context) (client api.SpecProv
 	return api.NewSpecProviderClient(p.conn), nil
 }
 
+type OfflineSpecProvider struct {
+	addr  string
+	opts  []grpc.DialOption
+	conn  *grpc.ClientConn
+	rspec *RemoteSpecProvider
+	mu    sync.RWMutex
+}
+
+// GetSpec returns the spec for the image or a wrapped ErrRefInvalid
+func (p *OfflineSpecProvider) GetSpec(ctx context.Context, ref, authToken string) (*api.ImageSpec, error) {
+	client, err := p.getClient(ctx)
+	if err != nil {
+		return nil, xerrors.Errorf("%w: %s", ErrRefInvalid, err.Error())
+	}
+
+	log.WithField("authToken", authToken).WithField("ref", ref).Debug("OfflineSpecProvider GetSpec")
+	resp, err := client.GetWorkspaceContext(ctx, &api.GetWorkspaceContextRequest{
+		ContextUrl: ref,
+	}, grpc.Header(&metadata.MD{
+		"Authorization": []string{"Bearer " + authToken},
+	}))
+	if err != nil {
+		return nil, xerrors.Errorf("%w: %s", ErrRefInvalid, err.Error())
+	}
+
+	specc, err := p.rspec.getClient(ctx)
+	if err != nil {
+		return nil, xerrors.Errorf("%w: %s", ErrRefInvalid, err.Error())
+	}
+
+	spec, err := specc.GetOfflineImageSpec(ctx, &api.GetOfflineImageSpecRequest{
+		Req: resp,
+	})
+	if err != nil {
+		return nil, xerrors.Errorf("%w: %s", ErrRefInvalid, err.Error())
+	}
+	return spec.Spec, nil
+}
+
+func (p *OfflineSpecProvider) getClient(ctx context.Context) (client api.ContextProviderClient, err error) {
+	isValidConn := func() bool {
+		return p.conn != nil && p.conn.GetState() != connectivity.TransientFailure
+	}
+
+	p.mu.RLock()
+	if isValidConn() {
+		defer p.mu.RUnlock()
+		return api.NewContextProviderClient(p.conn), nil
+	}
+	p.mu.RUnlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if isValidConn() {
+		return api.NewContextProviderClient(p.conn), nil
+	}
+
+	p.conn, err = grpc.DialContext(ctx, p.addr, p.opts...)
+	if err != nil {
+		return nil, err
+	}
+	return api.NewContextProviderClient(p.conn), nil
+}
+
+func NewOfflineSpecProvider(rspec *RemoteSpecProvider, ctxProvAddr string, opts []grpc.DialOption) *OfflineSpecProvider {
+	return &OfflineSpecProvider{
+		addr:  ctxProvAddr,
+		opts:  opts,
+		rspec: rspec,
+	}
+}
+
 // NewCachingSpecProvider creates a new LRU caching spec provider with a max number of specs it can cache.
 func NewCachingSpecProvider(space int, delegate ImageSpecProvider) (*CachingSpecProvider, error) {
 	cache, err := lru.New(space)
@@ -101,12 +175,12 @@ type CachingSpecProvider struct {
 }
 
 // GetSpec returns the spec for the image or a wrapped ErrRefInvalid
-func (p *CachingSpecProvider) GetSpec(ctx context.Context, ref string) (*api.ImageSpec, error) {
+func (p *CachingSpecProvider) GetSpec(ctx context.Context, ref, authToken string) (*api.ImageSpec, error) {
 	res, ok := p.Cache.Get(ref)
 	if ok {
 		return res.(*api.ImageSpec), nil
 	}
-	spec, err := p.Delegate.GetSpec(ctx, ref)
+	spec, err := p.Delegate.GetSpec(ctx, ref, authToken)
 	if err != nil {
 		return nil, err
 	}
